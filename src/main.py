@@ -2,10 +2,8 @@ import pandas as pd
 import numpy as np
 import os
 import pickle
-
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-
 import tensorflow as tf
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
@@ -13,38 +11,29 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Embedding, Dropout
 from tensorflow.keras.optimizers import Adam
 
-print("Checking for GPU...")
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
-    print(f"GPU detected: {gpus[0].name}")
     for gpu in gpus:
         tf.config.experimental.set_memory_growth(gpu, True)
-else:
-    print("No GPU found, using CPU")
 
 sentences = []
 
 try:
     df_slang = pd.read_csv('all_slangs.csv')
     sentences.extend(df_slang['Example'].tolist())
-    print(f"Loaded {len(df_slang)} slang examples")
 except FileNotFoundError:
-    print("all_slangs.csv not found")
+    pass
 
 try:
     df_english = pd.read_csv('english.csv')
     if 'def' in df_english.columns:
         definitions = df_english['def'].dropna().astype(str).tolist()
         definitions = [d for d in definitions if 3 <= len(d.split()) <= 20]
-        
         import random
         random.shuffle(definitions)
-        definitions = definitions[:40000]
-        
         sentences.extend(definitions)
-        print(f"Loaded {len(definitions)} dictionary definitions")
 except FileNotFoundError:
-    print("english.csv not found")
+    pass
 
 conversational = [
     "hello how are you doing today",
@@ -98,22 +87,19 @@ conversational = [
     "how did everything turn out",
     "that sounds really interesting to me",
     "i've never heard of that before",
-] * 200
+    "hello, how are",
+    "hi",
+] * 100
 
 sentences.extend(conversational)
 
 if not sentences:
     sentences = ["That's so cool!", "I love this.", "This is amazing!"] * 100
 
-print(f"Total training sentences: {len(sentences)}")
-
-print("Tokenizing...")
 tokenizer = Tokenizer(num_words=15000)
 tokenizer.fit_on_texts(sentences)
 total_words = min(len(tokenizer.word_index) + 1, 15000)
-print(f"Vocabulary size: {total_words}")
 
-print("Creating training sequences...")
 input_sequences = []
 for line in sentences:
     token_list = tokenizer.texts_to_sequences([line])[0]
@@ -127,9 +113,6 @@ input_sequences = pad_sequences(input_sequences, maxlen=max_sequence_len, paddin
 X = input_sequences[:, :-1]
 y = input_sequences[:, -1]
 
-print(f"Training patterns: {len(X):,}")
-print(f"Max sequence length: {max_sequence_len}")
-
 model = Sequential([
     Embedding(total_words, 100, input_length=max_sequence_len-1),
     LSTM(200, return_sequences=True),
@@ -139,35 +122,19 @@ model = Sequential([
     Dense(total_words, activation='softmax')
 ])
 
-model.compile(loss='sparse_categorical_crossentropy', 
-              optimizer=Adam(learning_rate=0.002), 
-              metrics=['accuracy'])
+model.compile(loss='sparse_categorical_crossentropy', optimizer=Adam(learning_rate=0.002), metrics=['accuracy'])
 
-print("\nModel Summary:")
-model.summary()
-
-print("\n" + "="*60)
-print("TRAINING...")
-print("="*60)
-
-samples_per_sec = 1500
-total_samples = len(X) * 30
-estimated_seconds = total_samples / samples_per_sec
-print(f"Estimated time: ~{int(estimated_seconds/60)} minutes")
-print("="*60)
-
-history = model.fit(X, y, 
-                   epochs=30, 
-                   batch_size=256, 
-                   verbose=1, 
-                   validation_split=0.1)
-
-print("\nTRAINING COMPLETE!")
+model.fit(X, y, epochs=30, batch_size=1024, verbose=1, validation_split=0.1)
 
 model.save('goofy_ai_model.h5')
 with open('tokenizer.pkl', 'wb') as f:
     pickle.dump(tokenizer, f)
-print("Model saved!")
+
+def sample_top_k(preds, k=10):
+    preds = np.asarray(preds).astype('float64')
+    preds[np.argsort(preds)[:-k]] = 0
+    preds = preds / np.sum(preds)
+    return np.random.choice(len(preds), p=preds)
 
 def generate_text(seed_text, next_words=15, temperature=0.6):
     for _ in range(next_words):
@@ -176,74 +143,49 @@ def generate_text(seed_text, next_words=15, temperature=0.6):
             words = seed_text.split()
             if words:
                 token_list = tokenizer.texts_to_sequences([words[-1]])[0]
-        
         if not token_list:
             seed_text = "that is"
             token_list = tokenizer.texts_to_sequences([seed_text])[0]
-        
         if not token_list:
             return seed_text
-        
         token_list = pad_sequences([token_list], maxlen=max_sequence_len-1, padding='pre')
         predictions = model.predict(token_list, verbose=0)[0]
-        
         predictions = np.log(predictions + 1e-7) / temperature
         exp_preds = np.exp(predictions)
         predictions = exp_preds / np.sum(exp_preds)
-        
-        predicted = np.random.choice(len(predictions), p=predictions)
-        
+        predicted = sample_top_k(predictions, k=10)
         output_word = ""
         for word, index in tokenizer.word_index.items():
             if index == predicted:
                 output_word = word
                 break
-        
         if output_word:
             seed_text += " " + output_word
         else:
             break
-    
     return seed_text
 
 def chat():
-    print("\n" + "="*60)
-    print("CHAT MODE")
-    print("="*60)
-    print("Commands: 'temp X' | 'words X' | 'quit'")
-    print("="*60)
-    
     temperature = 0.6
     num_words = 15
-    
     while True:
         user_input = input("\nYou: ").strip()
-        
         if not user_input:
             continue
-        
         if user_input.lower() == 'quit':
-            print("Goodbye!")
             break
-        
         if user_input.lower().startswith('temp '):
             try:
                 temperature = float(user_input.split()[1])
-                print(f"Temperature: {temperature}")
                 continue
             except:
-                print("Invalid")
                 continue
-        
         if user_input.lower().startswith('words '):
             try:
                 num_words = int(user_input.split()[1])
-                print(f"Length: {num_words}")
                 continue
             except:
-                print("Invalid")
                 continue
-        
         response = generate_text(user_input, next_words=num_words, temperature=temperature)
         print(f"AI: {response}")
 
